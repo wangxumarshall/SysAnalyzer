@@ -22,6 +22,8 @@ ohos_source_set("parser") {
     "bytrace_parser/bytrace_hilog_parser.cpp",
     "bytrace_parser/bytrace_parser.cpp",
     "event_parser_base.cpp",
+    "perf_script_parser.cpp", # Added
+    "perf_script_parser.h",   # Added
     "print_event_parser.cpp",
     "thread_state_flag.cpp",
   ]

@@ -34,6 +34,7 @@
 #include "parser/bytrace_parser/bytrace_parser.h"
 #include "parser/htrace_pbreader_parser/htrace_parser.h"
 #include "parser/rawtrace_parser/rawtrace_parser.h"
+#include "parser/perf_script_parser.h" // Added
 #include "perf_data_filter.h"
 #include "process_filter.h"
 #include "slice_filter.h"
@@ -55,6 +56,34 @@ TraceFileType GuessFileType(const uint8_t* data, size_t size)
     if (size == 0) {
         return TRACE_FILETYPE_UN_KNOW;
     }
+    // Guess Perf Script by typical command line start
+    // This is a heuristic and might need refinement.
+    // Example: "perf script record -e cpu-clock -a -g -- sleep 1"
+    // Or just the output starting with a command name.
+    // A simple check for common command characters or structure.
+    // This is a weak check, as bytrace can also start with text.
+    // A more robust check might involve looking for the typical perf script line format.
+    // For now, we'll rely on the user specifying or a stronger signal if available.
+    // If the file starts with something like "my-command " or "perf ", it *could* be a perf script.
+    // This particular check is very basic.
+    std::string initialContent(reinterpret_cast<const char*>(data), std::min<size_t>(size, 256)); // Look at a bit more data
+    // Look for a pattern like: command pid/tid timestamp: event_name
+    // Example: find 4729/4729 2353410.124803: cpu-clock:
+    // This regex is simplified for a quick check.
+    const std::regex perfScriptLineRegex(R"((.+?)\s+(\d+)(?:/(\d+))?\s+([\d.]+):\s*(?:.+?)\s*([a-zA-Z0-9_-]+):)");
+    if (std::regex_search(initialContent, perfScriptLineRegex)) {
+        // Further check: if it also looks like bytrace, bytrace might take precedence
+        // or we need a more specific way to distinguish.
+        // For now, if it matches this, assume PERF_SCRIPT.
+        // This is a placeholder for a potentially more robust detection mechanism.
+        // A common issue is that Bytrace can also contain similar text patterns.
+        // A dedicated file extension or metadata would be better.
+        // Let's assume for now that this check is sufficient for initial testing,
+        // or that the fileType_ will be set externally for TRACE_FILE_PERF_SCRIPT.
+        // TS_LOGW("Perf script pattern heuristic match, considering TRACE_FILETYPE_PERF_SCRIPT");
+        // return TRACE_FILETYPE_PERF_SCRIPT; // Tentatively disabled due to high false positive risk with bytrace
+    }
+
     std::string start(reinterpret_cast<const char*>(data), std::min<size_t>(size, 20));
     if (start.find("# tracer") != std::string::npos) {
         return TRACE_FILETYPE_BY_TRACE;
@@ -107,9 +136,15 @@ TraceFileType GuessFileType(const uint8_t* data, size_t size)
 } // namespace
 
 TraceStreamerSelector::TraceStreamerSelector()
-    : fileType_(TRACE_FILETYPE_UN_KNOW), bytraceParser_(nullptr), htraceParser_(nullptr), rawTraceParser_(nullptr)
+    : fileType_(TRACE_FILETYPE_UN_KNOW),
+      bytraceParser_(nullptr),
+      htraceParser_(nullptr),
+      rawTraceParser_(nullptr),
+      perfScriptParser_(nullptr) // Initialized to nullptr
 {
     InitFilter();
+    // Instantiate PerfScriptParser here as it doesn't depend on file type guess
+    perfScriptParser_ = std::make_unique<PerfScriptParser>(traceDataCache_.get(), streamFilters_.get());
 }
 TraceStreamerSelector::~TraceStreamerSelector() {}
 
@@ -214,6 +249,8 @@ bool TraceStreamerSelector::ParseTraceDataSegment(std::unique_ptr<uint8_t[]> dat
     }
     if (fileType_ == TRACE_FILETYPE_UN_KNOW) {
         fileType_ = GuessFileType(data.get(), size);
+        // NOTE: PerfScriptParser is already created in the constructor.
+        // We only need to create other parsers if their type is guessed.
         if (fileType_ == TRACE_FILETYPE_H_TRACE || fileType_ == TRACE_FILETYPE_PERF) {
             htraceParser_ = std::make_unique<HtraceParser>(traceDataCache_.get(), streamFilters_.get());
             htraceParser_->EnableFileSeparate(enableFileSeparate_);
@@ -223,7 +260,11 @@ bool TraceStreamerSelector::ParseTraceDataSegment(std::unique_ptr<uint8_t[]> dat
             bytraceParser_->EnableBytrace(fileType_ == TRACE_FILETYPE_BY_TRACE);
         } else if (fileType_ == TRACE_FILETYPE_RAW_TRACE) {
             rawTraceParser_ = std::make_unique<RawTraceParser>(traceDataCache_.get(), streamFilters_.get());
+        } else if (fileType_ == TRACE_FILETYPE_PERF_SCRIPT) {
+            // PerfScriptParser already created, nothing to do here for it
+            TS_LOGI("File type identified as Perf Script.");
         }
+        // This TRACE_FILETYPE_UN_KNOW check should ideally be after all specific type checks
         if (fileType_ == TRACE_FILETYPE_UN_KNOW) {
             SetAnalysisResult(TRACE_PARSER_FILE_TYPE_ERROR);
             TS_LOGI(
@@ -246,6 +287,13 @@ bool TraceStreamerSelector::ParseTraceDataSegment(std::unique_ptr<uint8_t[]> dat
         htraceParser_->StoreTraceDataSegment(std::move(data), size, isFinish);
     } else if (fileType_ == TRACE_FILETYPE_RAW_TRACE) {
         rawTraceParser_->ParseTraceDataSegment(std::move(data), size);
+    } else if (fileType_ == TRACE_FILETYPE_PERF_SCRIPT) {
+        // Assuming data is char* for PerfScriptParser. If it's uint8_t*, cast is needed.
+        // The ParsePerfScript method needs to be adapted for segmented data.
+        // The current PerfScriptParser::ParsePerfScript expects a single std::string.
+        // This will be addressed in Step 5.
+        // For now, let's call a placeholder or the modified signature.
+        perfScriptParser_->ParsePerfScript(reinterpret_cast<const char*>(data.get()), size, isFinish != 0);
     }
     SetAnalysisResult(TRACE_PARSER_NORMAL);
     return true;

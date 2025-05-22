@@ -1137,7 +1137,7 @@ js_heap_sample:记录timeline的时间轴信息
 |symbol_id     |INT       |
 |name          |TEXT      |
 #### 表描述
-记录了Hiperf采样数据的调用栈信息。
+记录Hiperf采样数据或 `perf script` 文本输出的调用栈信息。
 #### 主要字段描述
 - callchain_id：标识一组调用堆栈   
 - depth：调用栈深度  
@@ -1156,7 +1156,7 @@ js_heap_sample:记录timeline的时间轴信息
 |symbol        |TEXT      |
 |path          |TEXT      |
 #### 表描述
-记录Hiperf工具采集到的函数符号表和文件名。
+记录Hiperf工具采集到的或 `perf script` 文本输出解析出的函数符号表和文件名。
 #### 主要字段描述
 - file_id：文件编号  
 - serial_id：一个文件中可能有多个函数，serial_id表示函数的编号  
@@ -1171,7 +1171,7 @@ js_heap_sample:记录timeline的时间轴信息
 |report_type   |TEXT      |
 |report_value  |TEXT      |
 #### 表描述
-记录Hiperf工具采集数据时的配置信息。包括：抓取的事件类型，抓取数据的命令， 抓数据时指定的进程名称。
+记录Hiperf工具采集数据时或 `perf script` 文本输出解析时的配置信息（如事件名）。对于 `perf script`，这通常只包括事件名。
 #### 主要字段描述
 - report_type：数据类型。取值只有三种类型：config_name（事件类型）, workload（抓取的进程名）, cmdline（抓取命令）  
 - report_value：对应类型的取值
@@ -1190,7 +1190,7 @@ js_heap_sample:记录timeline的时间轴信息
 |cpu_id        |INT       |
 |thread_state  |TEXT      |
 #### 表描述
-记录Hiperf工具的采样信息。
+记录Hiperf工具或 `perf script` 文本输出的采样信息。
 #### 主要字段描述
 - timestamp：未进行时钟源同步的时间戳  
 - thread_id：线程号  
@@ -1209,7 +1209,7 @@ js_heap_sample:记录timeline的时间轴信息
 |process_id    |INT       |
 |thread_name   |TEXT      |
 #### 表描述
-记录Hiperf工具采集到的进程和线程数据。
+记录Hiperf工具采集到的或 `perf script` 文本输出解析出的进程和线程数据。
 #### 主要字段描述
 - thread_id：线程号  
 - process_id：进程号  
