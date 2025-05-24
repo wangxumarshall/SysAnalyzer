@@ -32,6 +32,19 @@ export interface LLMAnalysisData {
    * This helps the LLM understand the primary dimension of the flame chart data.
    */
   currentMetricMode: 'Duration' | 'Count' | 'Size' | string;
+
+  /**
+   * Optional array of source code snippets relevant to the hot paths.
+   */
+  sourceCodeSnippets?: Array<{
+    functionName: string; // The function associated with this snippet
+    filePath: string; // The resolved file path for the snippet
+    snippet?: string; // The actual code snippet
+    error?: string; // Error message if snippet fetching failed
+    requestedLine?: number; // The line number that was targeted (if any)
+    actualStartLine?: number; // Actual start line of the fetched snippet
+    actualEndLine?: number; // Actual end line of the fetched snippet
+  }>;
 }
 
 /**
@@ -162,11 +175,26 @@ Additional Contextual Data (e.g., CPU Load, Memory Pressure, System Events, I/O 
 ---
 ${contextInfo}
 ---
+${data.sourceCodeSnippets && data.sourceCodeSnippets.length > 0 ? `
 
-Based on all the provided information, please:
+Relevant Source Code Snippets:
+---
+${data.sourceCodeSnippets
+  .map(
+    (s) => `
+Snippet for function "${s.functionName}" from file "${s.filePath}" (around line ${s.requestedLine || 'N/A'}):
+Actual lines: ${s.actualStartLine || 'N/A'} to ${s.actualEndLine || 'N/A'}
+${s.error ? `Error fetching snippet: ${s.error}` : s.snippet}
+`
+  )
+  .join('\\n---')}
+---
+` : ''}
+
+Based on all the provided information, including any source code snippets, please:
 1.  Identify the primary performance bottleneck(s). Focus on what the flame chart data indicates as most significant given the "${data.currentMetricMode}" metric.
-2.  Explain potential root causes for these bottlenecks. **Explicitly state how the contextual data supports or contradicts potential causes.**
-3.  Provide clear, actionable optimization suggestions. **If possible, prioritize these suggestions by potential impact or ease of implementation.**
+2.  Explain potential root causes for these bottlenecks. **Explicitly state how the contextual data and source code snippets (if available and relevant) support or contradict potential causes.**
+3.  Provide clear, actionable optimization suggestions. **If possible, prioritize these suggestions by potential impact or ease of implementation. Refer to specific lines in snippets if applicable.**
 4.  (Optional) If the root cause is ambiguous based on the provided data, you may state this and list alternative potential causes with a brief explanation for each.
 
 Structure your response in JSON format with the following keys: "bottleneck", "rootCause", "suggestions".

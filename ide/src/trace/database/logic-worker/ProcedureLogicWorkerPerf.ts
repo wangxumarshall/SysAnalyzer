@@ -127,8 +127,132 @@ export class ProcedureLogicWorkerPerf extends LogicHandler {
               this.resolvingAction(data.params);
             }
           }
+        break;
+      case 'perf-fetchSourceSnippet':
+        this.fetchSourceSnippet(data.params)
+          .then((result) => {
+            // @ts-ignore
+            self.postMessage({
+              id: data.id,
+              action: data.action,
+              results: result,
+            });
+          })
+          .catch((err) => {
+            // @ts-ignore
+            self.postMessage({
+              id: data.id,
+              action: data.action,
+              results: { error: err.message, filePath: data.params.filePath },
+            });
+          });
           break;
       }
+    }
+  }
+
+  // Mock 'fs' module for environment where it's not available
+  private fsMock = {
+    readFileSync: (path: string, encoding: string): string => {
+      if (path === '/system/lib/libc.so' || path === 'C:/binary_cache/system/lib/libc.so') { // Example path
+        return `// Source code for ${path}
+#include <stdio.h>
+
+// Line 3
+// Line 4
+// Line 5: Target Line for testing
+// Line 6
+// Line 7
+// Line 8
+// Line 9
+// Line 10: Another interesting line
+// Line 11
+// Line 12
+// Line 13
+// Line 14
+// Line 15
+// Line 16
+// Line 17
+// Line 18
+// Line 19
+// Line 20: End of mock file part 1
+// Line 21
+// Line 22
+// Line 23
+// Line 24
+// Line 25
+// Line 26
+// Line 27
+// Line 28
+// Line 29
+// Line 30: End of mock file part 2`;
+      } else if (path === '/app/main.c') {
+        return `1: int main() {
+2:   printf("Hello, World!\\n");
+3:   // This is a comment
+4:   return 0;
+5: }`;
+      }
+      throw new Error(`Mock Error: File not found at ${path}`);
+    },
+    existsSync: (path: string): boolean => {
+       if (path === '/system/lib/libc.so' || path === 'C:/binary_cache/system/lib/libc.so' || path === '/app/main.c') {
+        return true;
+      }
+      return false;
+    }
+  };
+
+
+  public async fetchSourceSnippet(params: {
+    filePath: string;
+    targetLineNumber?: number;
+    contextLines?: number;
+  }): Promise<{ filePath: string; snippet?: string; error?: string; actualStartLine?: number; actualEndLine?: number }> {
+    const { filePath, targetLineNumber, contextLines = 5 } = params;
+    // In a real Node.js worker, you might use:
+    // const fs = require('fs');
+    // For this environment, we use the mock.
+    const fs = this.fsMock; // Use the mock
+
+    try {
+      if (!fs.existsSync(filePath)) {
+        return { filePath, error: 'File not found' };
+      }
+      const fileContent = fs.readFileSync(filePath, 'utf-8');
+      const lines = fileContent.split('\\n'); // Assuming standard newline characters
+
+      if (targetLineNumber !== undefined && targetLineNumber !== null) {
+        const targetIdx = targetLineNumber - 1; // 0-indexed
+
+        if (targetIdx < 0 || targetIdx >= lines.length) {
+          return { filePath, error: `Target line number ${targetLineNumber} is out of bounds for file with ${lines.length} lines.` };
+        }
+
+        const startIdx = Math.max(0, targetIdx - contextLines);
+        const endIdx = Math.min(lines.length -1 , targetIdx + contextLines);
+
+        const snippetLines = lines.slice(startIdx, endIdx + 1);
+        return {
+          filePath,
+          snippet: snippetLines.join('\\n'),
+          actualStartLine: startIdx + 1,
+          actualEndLine: endIdx + 1,
+        };
+      } else {
+        // Default: return first 20 lines or less if file is shorter
+        const defaultLineCount = 20;
+        const snippetLines = lines.slice(0, defaultLineCount);
+        return {
+          filePath,
+          snippet: snippetLines.join('\\n'),
+          actualStartLine: 1,
+          actualEndLine: snippetLines.length,
+        };
+      }
+    } catch (e: any) {
+      console.error(`Error reading file ${filePath}:`, e);
+      return { filePath, error: e.message || 'Failed to read file' };
     }
   }
 
