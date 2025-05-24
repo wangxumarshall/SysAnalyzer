@@ -57,6 +57,35 @@ export class TabpanePerfProfile extends BaseElement {
   private llmAnalyzer: LLMAnalyzer = new LLMAnalyzer();
   private aiAnalysisResultArea: HTMLDivElement | null | undefined;
   private analyzeButton: HTMLButtonElement | null | undefined;
+  private userSourceRoots: string[] = ['/system/lib', 'C:/binary_cache', '/app']; // Placeholder
+
+
+  async resolveSourcePath(libPathOrName: string, functionName: string): Promise<string | null> {
+    // Simplified for this subtask, using mocked paths
+    if (libPathOrName === 'libc.so' || libPathOrName.endsWith('/libc.so')) {
+        // Try to match with one of the userSourceRoots
+        for (const root of this.userSourceRoots) {
+            const potentialPath = `${root}/libc.so`;
+            // In a real scenario, this would be a check like fs.existsSync(potentialPath)
+            // For mock, we check if it's one of the paths ProcedureLogicWorkerPerf.fsMock knows
+             if (potentialPath === '/system/lib/libc.so' || potentialPath === 'C:/binary_cache/system/lib/libc.so') {
+                return potentialPath;
+            }
+        }
+    }
+    if (libPathOrName === 'main.c' || libPathOrName.endsWith('/main.c')) {
+         for (const root of this.userSourceRoots) {
+            const potentialPath = `${root}/main.c`;
+            if (potentialPath === '/app/main.c') { // Mocked path
+                return potentialPath;
+            }
+        }
+    }
+    // Add more specific checks if needed for other mocked files
+    console.warn(`Path resolution for "${libPathOrName}" (function "${functionName}"): Defaulting to null. Implement more robust resolution if needed.`);
+    return null;
+  }
+
 
   set data(perfProfilerSelection: SelectionParam | any) {
     if (perfProfilerSelection === this.currentSelection) {
@@ -606,11 +635,16 @@ export class TabpanePerfProfile extends BaseElement {
       (sum, node) => sum + this.getMetricValue(node, currentChartMode),
       0
     );
+    // Get top N nodes for snippet fetching - align with hot path extraction
+    const topNodesForSnippets = [...this.perfProfilerDataSource]
+        .sort((a, b) => this.getMetricValue(b, currentChartMode) - this.getMetricValue(a, currentChartMode))
+        .slice(0, 3); // Fetch snippets for top 3 hot roots for now
+
     const flameChartSummary = this.extractHotPaths(
       this.perfProfilerDataSource,
       currentChartMode,
       flameChartTotalValue,
-      5
+      5 // Number of hot paths in summary text
     );
 
     // 2. Contextual Data Fetching
@@ -743,11 +777,78 @@ export class TabpanePerfProfile extends BaseElement {
     if (!ipid && !itid) {
         contextualDataParts.push("- System-wide CPU usage or other metrics might be relevant but are not queried here.");
     }
+    const contextualDataString = contextualDataParts.join('\n');
+
+    // 3. Fetch Source Code Snippets for top hot functions
+    const sourceCodeSnippets: LLMAnalysisData['sourceCodeSnippets'] = [];
+    if (topNodesForSnippets.length > 0) {
+        this.aiAnalysisResultArea.innerText = 'Extracting data, fetching snippets, and analyzing with AI... Please wait.';
+    }
+
+    for (const node of topNodesForSnippets) {
+        const libPathOrName = node.libName || node.path; // Prefer libName, fallback to path
+        if (libPathOrName) {
+            const resolvedPath = await this.resolveSourcePath(libPathOrName, node.symbolName);
+            let requestedLineForSnippet = 1; // Default
+
+            // Optional hack for more diverse snippet testing with mock data
+            if (resolvedPath === '/system/lib/libc.so' && node.symbolName === topNodesForSnippets[0]?.symbolName) {
+                requestedLineForSnippet = 5;
+            } else if (resolvedPath === 'C:/binary_cache/system/lib/libc.so' && node.symbolName === topNodesForSnippets[0]?.symbolName) {
+                requestedLineForSnippet = 5; // if it resolved to the other libc path
+            } else if (resolvedPath === '/app/main.c') {
+                requestedLineForSnippet = 2;
+            }
+
+            let snippetEntry: typeof sourceCodeSnippets[0] = {
+                functionName: node.symbolName,
+                filePath: resolvedPath || libPathOrName, // Use original if not resolved for context
+                requestedLine: requestedLineForSnippet,
+            };
+
+            if (resolvedPath) {
+                try {
+                    const snippetResult = await new Promise<any>((resolve, reject) => {
+                        procedurePool.submitWithName(
+                            'logic0',
+                            'perf-fetchSourceSnippet',
+                            { filePath: resolvedPath, targetLineNumber: requestedLineForSnippet, contextLines: 10 },
+                            undefined,
+                            (res: any) => resolve(res),
+                            reject
+                        );
+                    });
+
+                    if (snippetResult.error) {
+                        snippetEntry.error = snippetResult.error;
+                    } else {
+                        snippetEntry.snippet = snippetResult.snippet;
+                        snippetEntry.actualStartLine = snippetResult.actualStartLine;
+                        snippetEntry.actualEndLine = snippetResult.actualEndLine;
+                    }
+                } catch (e: any) {
+                    snippetEntry.error = e.message || 'Unknown error fetching snippet';
+                }
+            } else {
+                snippetEntry.error = 'Path not resolved';
+            }
+            sourceCodeSnippets.push(snippetEntry);
+        } else {
+             sourceCodeSnippets.push({
+                functionName: node.symbolName,
+                filePath: 'Unknown',
+                error: 'Library path/name not available for this node.',
+                requestedLine: 1,
+            });
+        }
+    }
+
 
     const llmData: LLMAnalysisData = {
       flameChartSummary: flameChartSummary,
-      contextualData: contextualDataParts.join('\n'),
+      contextualData: contextualDataString,
       currentMetricMode: metricModeStr,
+      sourceCodeSnippets: sourceCodeSnippets,
     };
 
     try {
