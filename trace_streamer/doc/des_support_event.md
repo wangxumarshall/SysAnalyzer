@@ -86,6 +86,7 @@ trace_ebpf_paged_memory
 trace_ebpf_bio_latency
 trace_hisys_event
 trace_smaps
+perf_script_output // 新增：`perf script` 命令的纯文本输出。TraceStreamer 解析事件（如 cpu-clock）及相关的调用栈。数据存储在用于二进制 perf 数据的相同 SQLite 表中（例如 `perf_sample`、`perf_callchain`）。假定为标准 `perf script` 格式。内部类型：`TRACE_FILETYPE_PERF_SCRIPT`。
 ```
 ## 进程的内存事件
 ```

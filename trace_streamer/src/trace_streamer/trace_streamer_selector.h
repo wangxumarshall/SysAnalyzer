@@ -20,6 +20,7 @@
 #include "metrics.h"
 #include "trace_data/trace_data_cache.h"
 #include "trace_streamer_filters.h"
+#include "parser/perf_script_parser.h" // Added
 
 namespace SysTuning {
 namespace TraceStreamer {
@@ -89,6 +90,7 @@ private:
     std::unique_ptr<BytraceParser> bytraceParser_;
     std::unique_ptr<HtraceParser> htraceParser_;
     std::unique_ptr<RawTraceParser> rawTraceParser_;
+    std::unique_ptr<PerfScriptParser> perfScriptParser_; // Added
     bool enableFileSeparate_ = false;
 };
 } // namespace TraceStreamer

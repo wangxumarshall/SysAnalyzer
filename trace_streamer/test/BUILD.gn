@@ -53,6 +53,7 @@ if (is_test) {
       "unittest/native_hook_parser_test.cpp",
       "unittest/paged_memory_parser_test.cpp",
       "unittest/parser_pbreader_test.cpp",
+      "unittest/perf_script_parser_test.cpp", # Added
       "unittest/process_filter_test.cpp",
       "unittest/proto_reader_test.cpp",
       "unittest/query_file_test.cpp",

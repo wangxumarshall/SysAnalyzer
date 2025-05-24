@@ -22,6 +22,7 @@
 #include <string>
 using ClockId = uint32_t;
 const std::string INVALID_STRING = "INVALID_STRING";
+const std::string TRACE_PERF_SCRIPT = "PERF_SCRIPT_FORMAT"; // Added for Perf Script
 const uint64_t INVALID_ITID = std::numeric_limits<uint32_t>::max();
 const uint64_t INVALID_IPID = std::numeric_limits<uint32_t>::max();
 const uint64_t INVALID_UINT64 = std::numeric_limits<uint64_t>::max();
@@ -124,6 +125,7 @@ enum TraceFileType {
     TRACE_FILETYPE_SYSEVENT,
     TRACE_FILETYPE_PERF,
     TRACE_FILETYPE_HILOG,
+    TRACE_FILETYPE_PERF_SCRIPT, // Added for Perf Script
     TRACE_FILETYPE_UN_KNOW
 };
 
