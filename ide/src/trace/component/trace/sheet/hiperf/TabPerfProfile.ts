@@ -31,6 +31,7 @@ import '../../../../../base-ui/progress-bar/LitProgressBar.js';
 import { LitProgressBar } from '../../../../../base-ui/progress-bar/LitProgressBar.js';
 import { procedurePool } from '../../../../database/Procedure.js';
 import { showButtonMenu } from '../SheetUtils.js';
+import { LLMAnalyzer, LLMAnalysisData, LLMResponse } from '../../../../ai/LLMInteraction.js';
 
 @element('tabpane-perf-profile')
 export class TabpanePerfProfile extends BaseElement {
@@ -53,6 +54,9 @@ export class TabpanePerfProfile extends BaseElement {
   private perfProfileLoadingList: number[] = [];
   private perfProfileLoadingPage: any;
   private currentSelection: SelectionParam | undefined;
+  private llmAnalyzer: LLMAnalyzer = new LLMAnalyzer();
+  private aiAnalysisResultArea: HTMLDivElement | null | undefined;
+  private analyzeButton: HTMLButtonElement | null | undefined;
 
   set data(perfProfilerSelection: SelectionParam | any) {
     if (perfProfilerSelection === this.currentSelection) {
@@ -454,6 +458,317 @@ export class TabpanePerfProfile extends BaseElement {
       this.setPerfProfilerLeftTableData(this.perfProfilerDataSource);
       this.perfProfileFrameChart!.data = this.perfProfilerDataSource;
     });
+    this.analyzeButton = this.shadowRoot?.querySelector<HTMLButtonElement>('#analyze-button');
+    this.aiAnalysisResultArea = this.shadowRoot?.querySelector<HTMLDivElement>('#ai-analysis-result');
+    if (this.analyzeButton) {
+      this.analyzeButton.addEventListener('click', () => this.handleAIAnalysis());
+    }
+  }
+
+  private getMetricValue(node: PerfCallChainMerageData, mode: ChartMode | undefined): number {
+    switch (mode) {
+      case ChartMode.Byte:
+        return node.size;
+      case ChartMode.Count:
+        return node.count;
+      case ChartMode.Duration:
+      default: // Default to duration or handle as an error/unknown
+        return node.dur;
+    }
+  }
+
+  private formatNodeDetails(node: PerfCallChainMerageData, mode: ChartMode | undefined, totalValue: number): string {
+    const value = this.getMetricValue(node, mode);
+    const percentOfTotal = totalValue > 0 ? ((value / totalValue) * 100).toFixed(1) : 'N/A';
+    let metricUnit = '';
+    switch (mode) {
+      case ChartMode.Byte:
+        metricUnit = 'bytes';
+        break;
+      case ChartMode.Count:
+        metricUnit = 'samples';
+        break;
+      case ChartMode.Duration:
+        metricUnit = 'ns'; // Assuming 'dur' is in nanoseconds
+        break;
+    }
+    return `${node.symbol} (${node.libName || 'unknown_lib'}) [${value}${metricUnit}, ${percentOfTotal}% of total]`;
+  }
+
+  private extractHotPaths(
+    nodes: PerfCallChainMerageData[],
+    mode: ChartMode | undefined,
+    totalValue: number,
+    limit: number = 5
+  ): string {
+    if (!nodes || nodes.length === 0) {
+      return 'No flame chart data available to extract hot paths.';
+    }
+
+    const paths: Array<{ path: string; value: number }> = [];
+
+    function findPathsRecursive(
+      currentNode: PerfCallChainMerageData,
+      currentPath: string[],
+      currentPathValue: number
+    ) {
+      const nodeDetail = `${currentNode.symbol} (${currentNode.libName || 'N/A'})`;
+      currentPath.push(nodeDetail);
+
+      // Consider this path a potential "hot path" end
+      paths.push({
+        path: currentPath.join(' -> '),
+        value: currentPathValue + this.getMetricValue(currentNode, mode), // Sum of self times along path
+      });
+
+      if (currentNode.children && currentNode.children.length > 0) {
+        const sortedChildren = [...currentNode.children].sort(
+          (a, b) => this.getMetricValue(b, mode) - this.getMetricValue(a, mode)
+        );
+        for (const child of sortedChildren) {
+          findPathsRecursive(
+            child as PerfCallChainMerageData,
+            [...currentPath],
+            currentPathValue + this.getMetricValue(currentNode, mode)
+          );
+        }
+      }
+    }
+    // It's more common to see hot paths starting from roots and going down.
+    // We need to calculate the total weight of each root and its children to find true hot paths.
+    // For simplicity here, we'll sort by the top-level entries and show their primary child paths.
+    // A more accurate hot path would consider the sum of 'self' times down a specific stack.
+    // The `totalValue` parameter should be the sum of all root nodes' metrics for accurate percentage calculation.
+
+    const topNodes = [...nodes].sort((a, b) => this.getMetricValue(b, mode) - this.getMetricValue(a, mode));
+    let hotPathSummaries: string[] = [];
+
+    for (let i = 0; i < Math.min(topNodes.length, limit); i++) {
+      const topNode = topNodes[i];
+      let path = this.formatNodeDetails(topNode, mode, totalValue); // Use passed totalValue
+      let current = topNode;
+      let childCount = 0;
+      while (current.children && current.children.length > 0 && childCount < 3) { // Limit depth for summary
+        const heaviestChild = current.children.reduce(
+          (prev, curr) =>
+            this.getMetricValue(prev as PerfCallChainMerageData, mode) >
+            this.getMetricValue(curr as PerfCallChainMerageData, mode)
+              ? prev
+              : curr,
+          current.children[0]
+        ) as PerfCallChainMerageData;
+        path += ` -> ${this.formatNodeDetails(heaviestChild, mode, totalValue)}`; // Use passed totalValue
+        current = heaviestChild;
+        childCount++;
+      }
+      hotPathSummaries.push(`${i + 1}. ${path}`);
+    }
+
+    if (hotPathSummaries.length === 0) {
+      return 'Could not extract significant hot paths. Data might be flat or too sparse.';
+    }
+
+    return `Top ${hotPathSummaries.length} Hot Paths (Mode: ${
+      mode !== undefined ? ChartMode[mode] : 'Unknown'
+    }):\n${hotPathSummaries.join('\n')}`;
+  }
+
+  async handleAIAnalysis(): Promise<void> {
+    if (!this.aiAnalysisResultArea || !this.currentSelection) {
+      if (this.aiAnalysisResultArea) {
+        this.aiAnalysisResultArea.innerText = 'Error: Context or result area not available.';
+      }
+      return;
+    }
+
+    this.aiAnalysisResultArea.style.display = 'block';
+    this.aiAnalysisResultArea.innerText = 'Extracting data and analyzing with AI... Please wait.';
+
+    let metricModeStr: string;
+    let currentChartMode = this.perfProfileFrameChart?.mode;
+    switch (currentChartMode) {
+      case ChartMode.Byte:
+        metricModeStr = 'Size';
+        break;
+      case ChartMode.Count:
+        metricModeStr = 'Count';
+        break;
+      case ChartMode.Duration:
+        metricModeStr = 'Duration';
+        break;
+      default:
+        metricModeStr = 'Unknown';
+        currentChartMode = ChartMode.Duration; // Default for safety
+    }
+
+    // 1. Flame Chart Data Extraction
+    const flameChartTotalValue = this.perfProfilerDataSource.reduce(
+      (sum, node) => sum + this.getMetricValue(node, currentChartMode),
+      0
+    );
+    const flameChartSummary = this.extractHotPaths(
+      this.perfProfilerDataSource,
+      currentChartMode,
+      flameChartTotalValue,
+      5
+    );
+
+    // 2. Contextual Data Fetching
+    let contextualDataString = `Time Range: ${this.currentSelection.leftNs}ns to ${this.currentSelection.rightNs}ns.`;
+    const selectedProcess = this.currentSelection.perfProcess;
+    const selectedThread = this.currentSelection.perfThread;
+
+    let processInfo = 'Context: System-wide.';
+    if (selectedProcess && selectedProcess !== '0' && selectedProcess !== '') {
+        processInfo = `Process ID: ${selectedProcess}.`;
+        if (selectedThread && selectedThread !== '0' && selectedThread !== '') {
+            processInfo += ` Thread ID: ${selectedThread}.`;
+        }
+    }
+    contextualDataString += `\n${processInfo}`;
+
+    // 2. Contextual Data Fetching
+    let contextualDataParts: string[] = [];
+    contextualDataParts.push(`Time Range: ${this.currentSelection.leftNs}ns to ${this.currentSelection.rightNs}ns.`);
+
+    const perfProcess = this.currentSelection.perfProcess; // This is usually PID string
+    const perfThread = this.currentSelection.perfThread; // This is usually TID string
+    const startNs = this.currentSelection.leftNs;
+    const endNs = this.currentSelection.rightNs;
+
+    let ipid: number | undefined = undefined;
+    let itid: number | undefined = undefined;
+
+    // Helper function to make worker calls and append to contextualDataParts
+    const fetchAndFormat = async (
+      action: string,
+      args: any[],
+      formatter: (res: any) => string | null
+    ): Promise<void> => {
+      try {
+        const result = await new Promise<any[]>((resolve, reject) => {
+          procedurePool.submitWithName('logic0', 'perf-action', [{ funcName: action, funcArgs: args }], undefined, (res: any) => {
+            resolve(res);
+          }, reject);
+        });
+        const formattedString = formatter(result);
+        if (formattedString) {
+          contextualDataParts.push(formattedString);
+        }
+      } catch (error) {
+        console.warn(`Error fetching contextual data for ${action}:`, error);
+        contextualDataParts.push(`${action.replace('get', '')} data not available due to error.`);
+      }
+    };
+
+    // Get ipid from pid
+    if (perfProcess && perfProcess !== '0' && perfProcess !== '') {
+      contextualDataParts.push(`Process PID: ${perfProcess}.`);
+      const processResult = await new Promise<any[]>((resolve) => {
+        procedurePool.submitWithName('logic0', 'perf-getProcessInfo', [parseInt(perfProcess)], undefined, resolve);
+      });
+      if (processResult && processResult.length > 0 && processResult[0].id) {
+        ipid = processResult[0].id; // Assuming perf-getProcessInfo returns [{id: ipid, name: ...}]
+        contextualDataParts.push(`Internal Process ID (ipid): ${ipid}.`);
+      } else {
+        contextualDataParts.push(`Internal Process ID (ipid) for PID ${perfProcess} not found.`);
+      }
+    } else {
+      contextualDataParts.push('System-wide context (no specific process selected).');
+    }
+
+    // Get itid from tid (if pid and tid are present)
+    if (ipid && perfThread && perfThread !== '0' && perfThread !== '') {
+      contextualDataParts.push(`Thread TID: ${perfThread}.`);
+       const threadResult = await new Promise<any[]>((resolve) => {
+        procedurePool.submitWithName('logic0', 'perf-getThreadInfo', [parseInt(perfThread), ipid], undefined, resolve);
+      });
+      if (threadResult && threadResult.length > 0 && threadResult[0].id) {
+        itid = threadResult[0].id; // Assuming perf-getThreadInfo returns [{id: itid, name: ...}]
+         contextualDataParts.push(`Internal Thread ID (itid): ${itid}.`);
+      } else {
+        contextualDataParts.push(`Internal Thread ID (itid) for TID ${perfThread} not found within PID ${perfProcess}.`);
+      }
+    }
+
+    // Fetch data based on availability of ipid/itid
+    if (itid) { // Most specific context
+      await fetchAndFormat('getThreadCpuUsage', [itid, startNs, endNs], (res) =>
+        res && res.length > 0 ? `- Thread CPU Usage: ${res[0].cpu_usage_percentage?.toFixed(1)}% (${res[0].total_running_duration_ns}ns total execution)` : '- Thread CPU Usage: Not available.'
+      );
+      await fetchAndFormat('getThreadIoActivity', [itid, startNs, endNs], (res) => {
+        if (!res || res.length === 0) return '- Thread I/O Activity: Not available or none.';
+        let ioStr = '- Thread I/O Activity:\n';
+        res.forEach((r: any) => {
+          ioStr += `  - ${r.io_operation_type}: ${r.operation_count} ops, ${r.total_size_bytes} bytes, ${r.total_latency_ns}ns total latency.\n`;
+        });
+        return ioStr;
+      });
+      if (perfThread) { // OS TID needed for perf_sample
+        await fetchAndFormat('getThreadPerfEvents', [parseInt(perfThread), 'cache-misses', startNs, endNs], (res) =>
+          res && res.length > 0 ? `- Thread Cache Misses: ${res[0].total_event_occurrences || res[0].sample_count} events` : '- Thread Cache Misses: Not available or none.'
+        );
+      }
+    } else if (ipid) { // Process-level context
+      await fetchAndFormat('getProcessCpuUsage', [ipid, startNs, endNs], (res) =>
+        res && res.length > 0 ? `- Process CPU Usage: ${res[0].process_cpu_usage_percentage?.toFixed(1)}% (${res[0].total_process_cpu_time_ns}ns total execution)` : '- Process CPU Usage: Not available.'
+      );
+      await fetchAndFormat('getProcessMemorySummary', [ipid, startNs, endNs], (res) => {
+          if (!res || res.length === 0) return '- Process Memory Summary: Not available.';
+          const mem = res[0];
+          return `- Process Memory: Mallocs(${mem.total_malloc_apply_count} ops, ${mem.total_malloc_apply_size_bytes} bytes), ` +
+                 `Frees(${mem.total_malloc_release_count} ops, ${mem.total_malloc_release_size_bytes} bytes). ` +
+                 `Mmaps(${mem.total_mmap_apply_count} ops, ${mem.total_mmap_apply_size_bytes} bytes), ` +
+                 `Munmaps(${mem.total_mmap_release_count} ops, ${mem.total_mmap_release_size_bytes} bytes).`;
+        }
+      );
+      await fetchAndFormat('getProcessIoActivity', [ipid, startNs, endNs], (res) => {
+        if (!res || res.length === 0) return '- Process I/O Activity: Not available or none.';
+        let ioStr = '- Process I/O Activity:\n';
+        res.forEach((r: any) => {
+          ioStr += `  - ${r.io_operation_type}: ${r.operation_count} ops, ${r.total_size_bytes} bytes, ${r.total_latency_ns}ns total latency.\n`;
+        });
+        return ioStr;
+      });
+       if (perfProcess) { // OS PID needed for perf_sample
+        await fetchAndFormat('getProcessPerfEvents', [parseInt(perfProcess), 'cpu-cycles', startNs, endNs], (res) =>
+          res && res.length > 0 ? `- Process CPU Cycles: ${res[0].total_event_occurrences || res[0].sample_count} events` : '- Process CPU Cycles: Not available or none.'
+        );
+      }
+    } else {
+      contextualDataParts.push("No specific process or thread context for detailed CPU, Memory, or I/O queries.");
+    }
+    
+    // Placeholder for system-wide data if no specific process/thread
+    if (!ipid && !itid) {
+        contextualDataParts.push("- System-wide CPU usage or other metrics might be relevant but are not queried here.");
+    }
+
+    const llmData: LLMAnalysisData = {
+      flameChartSummary: flameChartSummary,
+      contextualData: contextualDataParts.join('\n'),
+      currentMetricMode: metricModeStr,
+    };
+
+    try {
+      const result = await this.llmAnalyzer.analyzePerfData(llmData);
+      if (typeof result === 'string') {
+        this.aiAnalysisResultArea.innerText = `AI Analysis Error:\n${result}`;
+      } else {
+        const formattedResult = `AI Analysis Complete:\n\n` +
+                                `Bottleneck:\n${result.bottleneck}\n\n` +
+                                `Potential Root Cause:\n${result.rootCause}\n\n` +
+                                `Suggestions:\n${result.suggestions}`;
+        this.aiAnalysisResultArea.innerText = formattedResult;
+      }
+    } catch (error) {
+      console.error('Error during AI Analysis:', error);
+      if (error instanceof Error) {
+        this.aiAnalysisResultArea.innerText = `An error occurred during AI analysis: ${error.message}`;
+      } else {
+        this.aiAnalysisResultArea.innerText = 'An unknown error occurred during AI analysis.';
+      }
+    }
   }
 
   connectedCallback() {
@@ -631,13 +946,34 @@ export class TabpanePerfProfile extends BaseElement {
             display: flex;
             flex: 1;
         }
+        #analyze-button {
+            margin: 5px;
+            padding: 8px 12px;
+            background-color: var(--dark-background5, #007bff);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #analyze-button:hover {
+            background-color: var(--dark-background2, #0056b3);
+        }
+        #ai-analysis-result {
+            margin-top: 10px;
+            padding: 10px;
+            border: 1px solid var(--dark-border,#ccc);
+            background-color: var(--dark-background4, #f9f9f9);
+            white-space: pre-wrap; /* Ensures newlines and spaces are preserved */
+            max-height: 300px;
+            overflow-y: auto;
+        }
     </style>
-    <div class="perf-profile-content" style="display: flex;flex-direction: row">
-    
-    <selector id='show_table' class="show">
-        <lit-slicer style="width:100%">
-        <div id="left_table" style="width: 65%">
-            <tab-native-data-modal id="modal"></tab-native-data-modal>
+    <div class="perf-profile-content" style="display: flex;flex-direction: column;">
+      <div style="display: flex; flex-direction: row;">
+        <selector id='show_table' class="show">
+            <lit-slicer style="width:100%">
+            <div id="left_table" style="width: 65%">
+                <tab-native-data-modal id="modal"></tab-native-data-modal>
             <lit-table id="tb-perf-profile" style="height: auto" tree>
                 <lit-table-column width="70%" title="Call Stack" data-index="symbol" key="symbol"  align="flex-start"retract></lit-table-column>
                 <lit-table-column width="1fr" title="Local" data-index="self" key="self"  align="flex-start"  order></lit-table-column>
@@ -646,26 +982,30 @@ export class TabpanePerfProfile extends BaseElement {
             </lit-table>
             
         </div>
-        <lit-slicer-track ></lit-slicer-track>
-        <lit-table id="tb-perf-list" no-head hideDownload style="height: auto;border-left: 1px solid var(--dark-border1,#e2e2e2)">
-            <span slot="head">Heaviest Stack Trace</span>
-            <lit-table-column width="60px" title="" data-index="type" key="type"  align="flex-start" >
-                <template>
-                    <img src="img/library.png" size="20" v-if=" type == 1 ">
-                    <img src="img/function.png" size="20" v-if=" type == 0 ">
-                </template>
-            </lit-table-column>
-            <lit-table-column width="1fr" title="" data-index="symbolName" key="symbolName"  align="flex-start"></lit-table-column>
-        </lit-table>
-        </div>
-        </lit-slicer>
-     </selector>
-     <tab-pane-filter id="filter" input inputLeftText icon tree></tab-pane-filter>
-     <lit-progress-bar class="progress perf-profile-progress"></lit-progress-bar>
-    <selector id='show_chart'>
-        <tab-framechart id='framechart' style='width: 100%;height: auto'> </tab-framechart>
-    </selector>  
-    <div class="loading perf-profile-loading"></div>
-    </div>`;
+            <lit-slicer-track ></lit-slicer-track>
+            <lit-table id="tb-perf-list" no-head hideDownload style="height: auto;border-left: 1px solid var(--dark-border1,#e2e2e2)">
+                <span slot="head">Heaviest Stack Trace</span>
+                <lit-table-column width="60px" title="" data-index="type" key="type"  align="flex-start" >
+                    <template>
+                        <img src="img/library.png" size="20" v-if=" type == 1 ">
+                        <img src="img/function.png" size="20" v-if=" type == 0 ">
+                    </template>
+                </lit-table-column>
+                <lit-table-column width="1fr" title="" data-index="symbolName" key="symbolName"  align="flex-start"></lit-table-column>
+            </lit-table>
+            </div>
+            </lit-slicer>
+        </selector>
+        <selector id='show_chart'>
+            <tab-framechart id='framechart' style='width: 100%;height: auto'> </tab-framechart>
+        </selector>
+      </div>
+      <button id="analyze-button">Analyze with AI</button>
+      <div id="ai-analysis-result" style="display: none;"></div>
+      <tab-pane-filter id="filter" input inputLeftText icon tree></tab-pane-filter>
+      <lit-progress-bar class="progress perf-profile-progress"></lit-progress-bar>
+      <div class="loading perf-profile-loading"></div>
+    </div>
+    `;
   }
 }
