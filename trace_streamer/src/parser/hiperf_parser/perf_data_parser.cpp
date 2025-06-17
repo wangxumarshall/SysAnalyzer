@@ -17,6 +17,8 @@
 #include "file.h"
 #include "perf_data_filter.h"
 #include "stat_filter.h"
+#include <set> // Added for std::set
+#include <string> // Added for std::to_string
 
 namespace SysTuning {
 namespace TraceStreamer {
@@ -668,11 +670,134 @@ void PerfDataParser::UpdatePerfSampleData(uint32_t callChainId, std::unique_ptr<
                                         configIndex, newTimeStamp, sample->data_.cpu, threadStatIndex);
 }
 
+void PerfDataParser::SynthesizeMissingMainThreadEntries()
+{
+    TS_LOGI("Starting to synthesize missing main thread entries in perf_thread.");
+
+    auto perfSampleTable = traceDataCache_->GetPerfSampleData();
+    if (perfSampleTable == nullptr || perfSampleTable->Size() == 0) {
+        TS_LOGI("No samples found in perf_sample table. Nothing to do.");
+        return;
+    }
+
+    std::set<uint32_t> relevantPids;
+
+    TS_LOGI("Found %zu samples entries to check for PIDs.", perfSampleTable->Size());
+
+    for (size_t i = 0; i < perfSampleTable->Size(); ++i) {
+        uint32_t sampleTid = perfSampleTable->Tids()[i]; // Direct access to Column data
+
+        auto pidRange = tidToPid_.equal_range(static_cast<uint64_t>(sampleTid));
+        for (auto it = pidRange.first; it != pidRange.second; ++it) {
+            relevantPids.insert(static_cast<uint32_t>(it->second));
+        }
+    }
+
+    if (relevantPids.empty()) {
+        TS_LOGI("No relevant PIDs found from samples that have corresponding PERF_RECORD_COMM. Nothing to do.");
+        return;
+    }
+
+    TS_LOGI("Collected %zu unique relevant PIDs for checking/synthesizing in perf_thread.", relevantPids.size());
+
+    // For debugging, print collected PIDs
+    // std::string pidsStr;
+    // for (uint32_t pid : relevantPids) {
+    //     pidsStr += std::to_string(pid) + ", ";
+    // }
+    // if (!pidsStr.empty()) {
+    //    pidsStr.resize(pidsStr.size() - 2); // Remove trailing comma and space
+    // }
+    // TS_LOGI("Unique PIDs collected: [%s]", pidsStr.c_str());
+
+    // New logic for Step 3 starts here
+    auto perfThreadTable = traceDataCache_->GetPerfThreadData();
+    if (perfThreadTable == nullptr) {
+        TS_LOGE("PerfThreadTable is null. Cannot proceed with checking existing entries.");
+        return;
+    }
+
+    std::set<uint32_t> pidsToSynthesize;
+
+    for (uint32_t currentPid : relevantPids) {
+        bool mainThreadEntryExists = false;
+        for (size_t i = 0; i < perfThreadTable->Size(); ++i) {
+            // Assuming PerfThreadTable has columns Pids() and Tids()
+            // These are the actual process_id and thread_id columns in the table
+            if (perfThreadTable->Pids()[i] == currentPid && perfThreadTable->Tids()[i] == currentPid) {
+                mainThreadEntryExists = true;
+                break;
+            }
+        }
+
+        if (!mainThreadEntryExists) {
+            pidsToSynthesize.insert(currentPid);
+        }
+    }
+
+    if (pidsToSynthesize.empty()) {
+        TS_LOGI("No PIDs require synthesis of main thread entries in perf_thread. All relevant processes already have them.");
+        return;
+    }
+
+    TS_LOGI("Identified %zu PIDs that need main thread entries synthesized in perf_thread.", pidsToSynthesize.size());
+    // For debugging, print PIDs to synthesize
+    // std::string pidsToSynthStr;
+    // for (uint32_t pid : pidsToSynthesize) {
+    //     pidsToSynthStr += std::to_string(pid) + ", ";
+    // }
+    // if (!pidsToSynthStr.empty()) {
+    //    pidsToSynthStr.resize(pidsToSynthStr.size() - 2);
+    // }
+    // TS_LOGI("PIDs to synthesize: [%s]", pidsToSynthStr.c_str());
+
+    // New logic for Step 4 starts here
+    if (streamFilters_ == nullptr || streamFilters_->processFilter_ == nullptr) {
+        TS_LOGE("ProcessFilter is not available, cannot get canonical process names.");
+        // Fallback to placeholder names for all syntheses if processFilter is missing
+        for (uint32_t pidToSynth : pidsToSynthesize) {
+            std::string placeholderName = "[PID " + std::to_string(pidToSynth) + "]";
+            DataIndex nameIndex = traceDataCache_->GetDataIndex(placeholderName.c_str());
+            perfThreadTable->AppendNewPerfThread(pidToSynth, pidToSynth, nameIndex);
+            TS_LOGI("Synthesized main thread entry for PID %u in perf_thread with placeholder name '%s'.", pidToSynth, placeholderName.c_str());
+        }
+        return; // Exit after attempting placeholder synthesis
+    }
+
+    for (uint32_t pidToSynth : pidsToSynthesize) {
+        std::string threadNameStr;
+        InternalPid ipid = streamFilters_->processFilter_->GetInternalPid(pidToSynth);
+
+        if (ipid != INVALID_UINT32) {
+            const auto& processData = traceDataCache_->GetConstProcessData(ipid);
+            // Check if cmdLine_ is not empty and not a default/placeholder if trace_streamer uses one
+            if (!processData.cmdLine_.empty()) {
+                threadNameStr = processData.cmdLine_;
+            }
+        }
+
+        if (threadNameStr.empty()) {
+            // Fallback if name not found via ProcessFilter or if processData.cmdLine_ was empty
+            threadNameStr = "[PID " + std::to_string(pidToSynth) + "]";
+            TS_LOGD("Using placeholder name for synthesized main thread entry for PID %u.", pidToSynth);
+        }
+
+        DataIndex nameIndex = traceDataCache_->GetDataIndex(threadNameStr.c_str());
+        perfThreadTable->AppendNewPerfThread(pidToSynth, pidToSynth, nameIndex);
+        TS_LOGI("Synthesized main thread entry for PID %u in perf_thread with name '%s'.", pidToSynth, threadNameStr.c_str());
+    }
+    TS_LOGI("Finished synthesizing missing main thread entries.");
+}
+
 void PerfDataParser::Finish()
 {
     if (!traceDataCache_->isSplitFile_) {
         streamFilters_->perfDataFilter_->Finish();
     }
+
+    // Add the call here
+    SynthesizeMissingMainThreadEntries();
+
     // Update trace_range when there is only perf data in the trace file
     if (traceDataCache_->traceStartTime_ == INVALID_UINT64 || traceDataCache_->traceEndTime_ == 0) {
         traceDataCache_->MixTraceTime(GetPluginStartTime(), GetPluginEndTime());

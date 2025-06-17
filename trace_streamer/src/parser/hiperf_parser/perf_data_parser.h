@@ -140,6 +140,8 @@ private:
                                 uint64_t& processedLen,
                                 bool& invalid);
 
+    void SynthesizeMissingMainThreadEntries();
+
     uint32_t callChainId_ = 0;
     std::unique_ptr<PerfFileReader> recordDataReader_ = nullptr;
     std::unique_ptr<uint8_t[]> buffer_ = {};
